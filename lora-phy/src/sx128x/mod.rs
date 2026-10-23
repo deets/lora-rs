@@ -1,6 +1,6 @@
 mod radio_kind_params;
 mod sx1280;
-use radio_kind_params::IrqMask::{CrcError, HeaderError};
+use radio_kind_params::IrqMask;
 pub use sx1280::Sx1280;
 mod sx1281;
 pub use sx1281::Sx1281;
@@ -25,9 +25,6 @@ const SX128X_MAX_LORA_SYMB_NUM_TIMEOUT: u16 = 1023;
 
 // Constant values need to compute the RSSI value
 const SX1282_RSSI_OFFSET: i16 = -139;
-const SX1286_RSSI_OFFSET_LF: i16 = -164;
-const SX1286_RSSI_OFFSET_HF: i16 = -157;
-const SX1286_RF_MID_BAND_THRESH: u32 = 525_000_000;
 
 const RADIOLIB_SX128X_CRYSTAL_FREQ: f32 = 52_000_000.0;
 const RADIOLIB_SX128X_DIV_EXPONENT: usize = 18;
@@ -234,7 +231,6 @@ where
     }
 
     async fn set_modulation_params(&mut self, mdltn_params: &ModulationParams) -> Result<(), RadioError> {
-        info!("set_modulation_params: {:02X}", OpCode::SetModulationParams as u8);
         let mod_param_1 = spreading_factor_value(mdltn_params.spreading_factor)?;
         let mod_param_2 = bandwidth_value(mdltn_params.bandwidth)?;
         let mod_param_3 = coding_rate_value(mdltn_params.coding_rate)?;
@@ -312,7 +308,7 @@ where
         let mut read_buf = [0; 0];
         // TODO: evaluate status as in RadioLib
         let status = self.intf.read_with_status(&buf, &mut read_buf).await?;
-        info!("status: {:02X}", status);
+        debug!("status: {:02X}", status);
         Ok(())
     }
 

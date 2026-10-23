@@ -97,9 +97,9 @@ pub enum CodingRate {
     _4_7,
     _4_8,
     // See Table 14-19 in SX128x datasheet
-    LI_4_5,
-    LI_4_6,
-    LI_4_8,
+    Li4_5,
+    Li4_6,
+    Li4_8,
 }
 
 impl CodingRate {
@@ -109,7 +109,7 @@ impl CodingRate {
             CodingRate::_4_6 => 6,
             CodingRate::_4_7 => 7,
             CodingRate::_4_8 => 8,
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 }

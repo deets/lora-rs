@@ -1,11 +1,8 @@
-use crate::mod_params::{ModulationParams, PacketParams, RadioError};
+use crate::mod_params::{PacketParams, RadioError};
 use crate::mod_traits::InterfaceVariant;
-use crate::sx128x::radio_kind_params::{RampTime, Register, Sx128xVariant, spreading_factor_value};
+use crate::sx128x::radio_kind_params::Sx128xVariant;
 use crate::sx128x::{SX1282_RSSI_OFFSET, Sx128x};
 use embedded_hal_async::spi::SpiDevice;
-use lora_modulation::Bandwidth;
-
-use super::radio_kind_params::OpCode;
 
 /// Sx1280 implements the Sx128xVariant trait
 pub struct Sx1280;
