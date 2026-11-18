@@ -9,7 +9,7 @@ mod fixtures;
 use fixtures::{CommandStreamFixture, Delayer, Ops, get_sx1280, get_sx1281};
 
 use super::radio_kind_params::PacketType;
-use crate::mod_params::{RadioMode, RxMode};
+use crate::mod_params::{RadioError, RadioMode, RxMode};
 use crate::mod_traits::{IrqState, RadioKind};
 use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
 use smtc_modem_cores::sx128x::{
@@ -38,12 +38,17 @@ async fn test_reset() {
 
 #[tokio::test]
 async fn test_sleep() {
-    // Configuration retained, data buffer flushed (sleepConfig bit 0 only)
-    let mut reference = reference();
-    reference.set_sleep(false, true);
-    let mut radio = get_sx1280();
-    radio.set_sleep(false, &mut Delayer).await.unwrap();
-    assert_eq!(radio.take_spi(), reference.inner);
+    for retain_config in [false, true] {
+        let mut reference = reference();
+        if retain_config {
+            reference.save_context();
+        }
+        reference.set_sleep(false, retain_config);
+
+        let mut radio = get_sx1280();
+        radio.set_sleep(retain_config, &mut Delayer).await.unwrap();
+        assert_eq!(radio.take_spi(), reference.inner);
+    }
 }
 
 #[tokio::test]
@@ -315,11 +320,11 @@ async fn test_dio_irq_params() {
     // The masks are this driver's policy; the reference pins the framing.
     // Transmit: TxDone | RxDone | SyncWordValid | SyncWordError | CrcError
     // enabled, TxDone | RxDone routed to DIO1. Receive: RxDone | HeaderValid
-    // | HeaderError | CrcError | RxTxTimeout enabled, RxDone | RxTxTimeout
-    // routed to DIO1.
+    // | HeaderError | CrcError | RxTxTimeout enabled, with all except
+    // HeaderValid routed to DIO1.
     let cases = [
         ("transmit", RadioMode::Transmit, 0x004Fu16, 0x0003u16),
-        ("receive", RadioMode::Receive(RxMode::Continuous), 0x4072, 0x4002),
+        ("receive", RadioMode::Receive(RxMode::Continuous), 0x4072, 0x4062),
         ("cad", RadioMode::ChannelActivityDetection, 0x3000, 0x3000),
     ];
     for (label, mode, irq_mask, dio1_mask) in cases {
@@ -381,6 +386,23 @@ async fn test_get_irq_status() {
 
     assert_eq!(radio.take_spi(), reference.inner);
     assert_eq!(c_irq, 0x0001);
+}
+
+#[tokio::test]
+async fn test_rx_errors_take_precedence_over_rx_done() {
+    for mode in [RxMode::Continuous, RxMode::SingleMs(10)] {
+        for (flags, error) in [
+            (0x0020, RadioError::HeaderError),
+            (0x0022, RadioError::HeaderError),
+            (0x0040, RadioError::CrcError),
+            (0x0042, RadioError::CrcError),
+        ] {
+            let mut radio = get_sx1280();
+            radio.spi_mut().prime_read(&[0x15, 0], &u16::to_be_bytes(flags));
+            let result = radio.process_irq_event(RadioMode::Receive(mode), None, true).await;
+            assert!(matches!(result, Err(actual) if actual == error));
+        }
+    }
 }
 
 #[tokio::test]
@@ -495,4 +517,36 @@ async fn test_tx_continuous_wave() {
     let mut radio = get_sx1280();
     radio.set_tx_continuous_wave_mode().await.unwrap();
     assert_eq!(radio.take_spi(), reference.inner);
+}
+
+#[cfg(feature = "lorawan-radio")]
+#[tokio::test]
+async fn test_lorawan_setup_rx_uses_a_timed_window() {
+    use crate::{LoRa, lorawan_radio::LorawanRadio};
+    use lora_modulation::BaseBandModulationParams;
+    use lorawan_device::async_device::radio::{PhyRxTx, RfConfig, RxConfig, RxMode as LorawanRxMode};
+
+    let mut radio = get_sx1280();
+    radio
+        .spi_mut()
+        .prime_read(&[0x19, 0x01, 0xF0, 0x00], b"SX1280 firmware\0");
+    let lora = LoRa::new(radio, true, Delayer).await.unwrap();
+    let mut adapter = LorawanRadio::<_, _, 13>::from(lora);
+
+    adapter
+        .setup_rx(RxConfig {
+            rf: RfConfig {
+                frequency: TEST_FREQ_HZ,
+                bb: BaseBandModulationParams::new(SpreadingFactor::_7, Bandwidth::_400KHz, CodingRate::_4_5),
+                max_payload_len: 255,
+            },
+            mode: LorawanRxMode::Single { ms: 10 },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        adapter.lora.radio_mode,
+        RadioMode::Receive(RxMode::SingleMs(15))
+    ));
+    adapter.lora.start_rx().await.unwrap();
 }

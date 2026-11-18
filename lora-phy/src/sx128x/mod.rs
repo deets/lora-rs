@@ -271,13 +271,15 @@ where
         self.intf.write(&buf, false).await
     }
 
-    async fn set_sleep(&mut self, _warm_start_if_possible: bool, _delay: &mut impl DelayNs) -> Result<(), RadioError> {
-        // Warm start is unavailable for sx128x
+    async fn set_sleep(&mut self, warm_start_if_possible: bool, _delay: &mut impl DelayNs) -> Result<(), RadioError> {
         self.intf.iv.disable_rf_switch().await?;
-        // Table 11-17: allow for faster SLEEP to STDBY_RC transition
-        let buf = [OpCode::SetSleep as u8, 0x01];
-        self.intf.write(&buf, true).await?;
-        Ok(())
+        // The SX128x requires SaveContext before retaining radio configuration.
+        if warm_start_if_possible {
+            self.intf.write(&[OpCode::SetSaveContext as u8], false).await?;
+        }
+        self.intf
+            .write(&[OpCode::SetSleep as u8, u8::from(warm_start_if_possible)], true)
+            .await
     }
 
     async fn set_tx_rx_buffer_base_address(
@@ -356,8 +358,6 @@ where
     }
 
     async fn do_rx(&mut self, rx_mode: RxMode) -> Result<(), RadioError> {
-        self.set_tx_rx_buffer_base_address(0, 0).await?;
-        self.clear_irq_status().await?;
         // Table 11-23, same choices as ral_sx128x_set_rx; 0xFFFF on the
         // 1 ms base is continuous, longer windows move to the 4 ms base
         let (period_base, period_base_count) = match rx_mode {
@@ -366,6 +366,9 @@ where
             RxMode::SingleMs(ms) => (PeriodBase::_4ms, (ms >> 2).min(0xFFFE) as u16),
             RxMode::Single(_) | RxMode::DutyCycle(_) => return Err(RadioError::InvalidRadioMode),
         };
+        self.set_tx_rx_buffer_base_address(0, 0).await?;
+        self.clear_irq_status().await?;
+        self.intf.iv.enable_rf_switch_rx().await?;
         let pbb = period_base_count.to_be_bytes();
         let buffer = [OpCode::SetRx as u8, period_base as u8, pbb[0], pbb[1]];
         self.intf.write(&buffer, false).await
@@ -446,7 +449,10 @@ where
                     | IrqMask::HeaderError.value()
                     | IrqMask::CrcError.value()
                     | IrqMask::RxTxTimeout.value(),
-                IrqMask::RxDone.value() | IrqMask::RxTxTimeout.value(),
+                IrqMask::RxDone.value()
+                    | IrqMask::HeaderError.value()
+                    | IrqMask::CrcError.value()
+                    | IrqMask::RxTxTimeout.value(),
             ),
             Some(RadioMode::ChannelActivityDetection) => {
                 let mask = IrqMask::CadDone.value() | IrqMask::CadDetected.value();
@@ -474,6 +480,12 @@ where
         let irq_flags = u16::from_be_bytes(read_buffer);
         match radio_mode {
             RadioMode::Receive(RxMode::Continuous | RxMode::Single(_) | RxMode::SingleMs(_)) => {
+                if IrqMask::HeaderError.is_set_in(irq_flags) {
+                    return Err(RadioError::HeaderError);
+                }
+                if IrqMask::CrcError.is_set_in(irq_flags) {
+                    return Err(RadioError::CrcError);
+                }
                 if IrqMask::RxDone.is_set_in(irq_flags) {
                     debug!("RxDone in radio mode {}", radio_mode);
                     return Ok(Some(IrqState::Done));
