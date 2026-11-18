@@ -24,6 +24,10 @@ pub enum Bandwidth {
 }
 
 impl Bandwidth {
+    const fn is_sx128x(self) -> bool {
+        matches!(self, Self::_200KHz | Self::_400KHz | Self::_800KHz | Self::_1600KHz)
+    }
+
     pub const fn hz(self) -> u32 {
         match self {
             Bandwidth::_7KHz => 7810u32,
@@ -34,12 +38,12 @@ impl Bandwidth {
             Bandwidth::_41KHz => 41670u32,
             Bandwidth::_62KHz => 62500u32,
             Bandwidth::_125KHz => 125000u32,
-            Bandwidth::_200KHz => 200000u32,
+            Bandwidth::_200KHz => 203125u32,
             Bandwidth::_250KHz => 250000u32,
-            Bandwidth::_400KHz => 400000u32,
+            Bandwidth::_400KHz => 406250u32,
             Bandwidth::_500KHz => 500000u32,
-            Bandwidth::_800KHz => 800000u32,
-            Bandwidth::_1600KHz => 1600000u32,
+            Bandwidth::_800KHz => 812500u32,
+            Bandwidth::_1600KHz => 1625000u32,
         }
     }
 }
@@ -203,6 +207,10 @@ impl BaseBandModulationParams {
         explicit_header: bool,
         len: u8,
     ) -> u32 {
+        if self.bw.is_sx128x() {
+            return self.sx128x_time_on_air_us(preamble, explicit_header, len);
+        }
+
         let sf = self.sf.factor() as i32;
         let t_sym_us = self.t_sym_us;
 
@@ -234,6 +242,89 @@ impl BaseBandModulationParams {
             None => t_sym_us * payload_symb_nb,
             Some(preamble) => (4 * preamble as u32 + 17 + 4 * payload_symb_nb) * t_sym_us / 4,
         }
+    }
+
+    // SWL2001 sx128x_get_lora_time_on_air_numerator, with payload CRC enabled.
+    const fn sx128x_time_on_air_us(
+        self,
+        preamble: Option<u8>,
+        explicit_header: bool,
+        len: u8,
+    ) -> u32 {
+        let sf = self.sf.factor();
+        let coding_rate = self.cr.denom() as u32;
+        let payload_bits = len as u32 * 8;
+        let frame_bits = payload_bits + 16;
+        let bits_per_block = 4 * if sf <= 10 {
+            sf
+        } else {
+            sf - 2
+        };
+        let long_interleaving =
+            matches!(self.cr, CodingRate::Li4_5 | CodingRate::Li4_6 | CodingRate::Li4_8);
+
+        let payload_symbols = if !explicit_header && long_interleaving {
+            // The first eight symbols use a different rate from the rest at SF7–10.
+            let first_block_bits = if sf < 7 {
+                4 * sf
+            } else {
+                4 * (sf - 2)
+            };
+            let coded_bits = frame_bits * coding_rate;
+            if coded_bits <= 8 * first_block_bits {
+                coded_bits.div_ceil(first_block_bits)
+            } else {
+                (coded_bits - 8 * first_block_bits).div_ceil(bits_per_block) + 8
+            }
+        } else if long_interleaving {
+            let header_space = if sf < 7 {
+                (sf - 5) / 2
+            } else {
+                (sf - 7) / 2
+            } * 8;
+            let header_payload_bits = if frame_bits > header_space && payload_bits < header_space {
+                payload_bits
+            } else {
+                header_space
+            };
+            (frame_bits.saturating_sub(header_payload_bits) * coding_rate).div_ceil(bits_per_block)
+                + 8
+        } else {
+            let header_bits = if explicit_header {
+                20
+            } else {
+                0
+            };
+            let sf_adjustment = if sf >= 7 {
+                8
+            } else {
+                0
+            };
+            let bits = (frame_bits + header_bits + sf_adjustment).saturating_sub(4 * sf);
+            bits.div_ceil(bits_per_block) * coding_rate + 8
+        };
+
+        let preamble_quarter_symbols = match preamble {
+            Some(length) => {
+                // SetPacketParams rounds up to a representable mantissa and exponent.
+                let mut mantissa = length as u32;
+                let mut exponent = 0;
+                while mantissa > 15 {
+                    mantissa = mantissa.div_ceil(2);
+                    exponent += 1;
+                }
+                let sync_quarter_symbols = if sf < 7 {
+                    25
+                } else {
+                    17
+                };
+                4 * (mantissa << exponent) + sync_quarter_symbols
+            }
+            None => 0,
+        };
+        let quarter_symbols = 4 * payload_symbols + preamble_quarter_symbols;
+        let scaled_duration = (quarter_symbols as u64) * (1 << (sf - 2)) * 1_000_000;
+        (scaled_duration / self.bw.hz() as u64) as u32
     }
 }
 
@@ -275,6 +366,25 @@ mod tests {
     // data for time-on-air tests is verified against:
     // * https://www.thethingsnetwork.org/airtime-calculator
     // * https://avbentem.github.io/airtime-calculator/ttn/
+
+    #[test]
+    fn sx128x_airtime_matches_swl2001() {
+        let sf12 = BaseBandModulationParams::new(
+            SpreadingFactor::_12,
+            Bandwidth::_200KHz,
+            CodingRate::_4_5,
+        );
+        assert_eq!(sf12.symbol_duration_us(), 20_164);
+        assert_eq!(sf12.time_on_air_us(Some(8), true, 255), 5_550_395);
+
+        let sf7 = BaseBandModulationParams::new(
+            SpreadingFactor::_7,
+            Bandwidth::_400KHz,
+            CodingRate::Li4_5,
+        );
+        assert_eq!(sf7.time_on_air_us(Some(8), true, 10), 12_051);
+        assert_eq!(sf7.time_on_air_us(Some(8), false, 10), 10_161);
+    }
 
     #[test]
     fn time_on_air_for_short_messages() {

@@ -143,7 +143,19 @@ where
     }
 
     async fn setup_rx(&mut self, config: RxConfig) -> Result<(), Self::PhyError> {
-        let mode = RxMode::from(config.mode, config.rf.bb);
+        let mode = match config.mode {
+            LorawanRxMode::Continuous => RxMode::Continuous,
+            LorawanRxMode::Single { ms } => {
+                const PREAMBLE_SYMBOLS: u16 = 13;
+                let timeout_symbols = PREAMBLE_SYMBOLS.saturating_add(config.rf.bb.delay_in_symbols_ceil(ms));
+                select_single_rx_mode(
+                    timeout_symbols,
+                    config.rf.bb.symbol_duration_us(),
+                    RK::MAX_SINGLE_RX_SYMBOLS,
+                    RK::SUPPORTS_TIMED_SINGLE_RX,
+                )
+            }
+        };
         self.setup_rx_mode(config, mode).await
     }
 
@@ -225,18 +237,6 @@ where
         self.lora.prepare_for_rx(mode, &mdltn_params, &rx_pkt_params).await?;
         self.rx_pkt_params = Some(rx_pkt_params);
         Ok(())
-    }
-}
-
-impl RxMode {
-    fn from(mode: LorawanRxMode, bb: lora_modulation::BaseBandModulationParams) -> Self {
-        match mode {
-            LorawanRxMode::Continuous => RxMode::Continuous,
-            LorawanRxMode::Single { ms } => {
-                const PREAMBLE_SYMBOLS: u16 = 13;
-                RxMode::Single(PREAMBLE_SYMBOLS.saturating_add(bb.delay_in_symbols_ceil(ms)))
-            }
-        }
     }
 }
 
